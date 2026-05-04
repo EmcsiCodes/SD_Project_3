@@ -10,6 +10,8 @@ RECOMMENDATION_SERVICE_URL = os.getenv(
     "http://localhost:8002"
 )
 
+RECOMMENDATION_TIMEOUT_SECONDS = 1.5
+
 MOVIES = {
     "1": {
         "title": "Inception",
@@ -33,6 +35,8 @@ MOVIES = {
     }
 }
 
+TRENDING_MOVIE_IDS = ["1", "2", "3"]
+
 
 @app.get("/health")
 def health_check():
@@ -42,16 +46,54 @@ def health_check():
     }
 
 
+def build_movie_list(movie_ids):
+    movies = []
+
+    for movie_id in movie_ids:
+        movie = MOVIES.get(movie_id)
+
+        if movie is not None:
+            movies.append({
+                "id": movie_id,
+                "title": movie["title"],
+                "description": movie["description"]
+            })
+
+    return movies
+
+
 async def fetch_recommendations(movie_id: str):
     url = f"{RECOMMENDATION_SERVICE_URL}/recommendations/{movie_id}"
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url)
+    try:
+        async with httpx.AsyncClient(timeout=RECOMMENDATION_TIMEOUT_SECONDS) as client:
+            response = await client.get(url)
 
-    response.raise_for_status()
-    data = response.json()
+        response.raise_for_status()
+        data = response.json()
 
-    return data["recommended_movie_ids"]
+        return {
+            "movie_ids": data["recommended_movie_ids"],
+            "source": "recommendation-service"
+        }
+
+    except httpx.TimeoutException:
+        return {
+            "movie_ids": TRENDING_MOVIE_IDS,
+            "source": "fallback-trending-timeout"
+        }
+
+    except httpx.HTTPStatusError:
+        return {
+            "movie_ids": TRENDING_MOVIE_IDS,
+            "source": "fallback-trending-http-error"
+        }
+
+    except httpx.RequestError:
+        return {
+            "movie_ids": TRENDING_MOVIE_IDS,
+            "source": "fallback-trending-service-unavailable"
+        }
 
 
 @app.get("/movies/{movie_id}")
@@ -61,19 +103,9 @@ async def get_movie_page(movie_id: str):
     if movie is None:
         raise HTTPException(status_code=404, detail="Movie not found")
 
-    recommended_movie_ids = await fetch_recommendations(movie_id)
+    recommendation_result = await fetch_recommendations(movie_id)
 
-    recommended_movies = []
-
-    for recommended_id in recommended_movie_ids:
-        recommended_movie = MOVIES.get(recommended_id)
-
-        if recommended_movie is not None:
-            recommended_movies.append({
-                "id": recommended_id,
-                "title": recommended_movie["title"],
-                "description": recommended_movie["description"]
-            })
+    similar_movies = build_movie_list(recommendation_result["movie_ids"])
 
     return {
         "movie": {
@@ -81,5 +113,6 @@ async def get_movie_page(movie_id: str):
             "title": movie["title"],
             "description": movie["description"]
         },
-        "similar_movies": recommended_movies
+        "similar_movies": similar_movies,
+        "recommendation_source": recommendation_result["source"]
     }
